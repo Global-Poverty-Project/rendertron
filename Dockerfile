@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 node:17-slim
+FROM --platform=linux/amd64 node:24-bookworm-slim
 
 RUN apt update && apt dist-upgrade -y && \
   apt install -y wget gnupg2 && \

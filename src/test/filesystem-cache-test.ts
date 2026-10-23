@@ -16,6 +16,9 @@
 
 'use strict';
 
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import Koa from 'koa';
 import koaCompress from 'koa-compress';
 import request from 'supertest';
@@ -223,5 +226,219 @@ test.serial(
     t.is(res.status, 200);
     t.falsy(res.header['x-rendertron-cached']);
     t.false(new Date(res.header['x-rendertron-cached']) <= new Date());
+  }
+);
+
+const testDirs: string[] = [];
+
+function makeCache(maxEntries = '100') {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rendertron-test-'));
+  testDirs.push(dir);
+  const testConfig = {
+    ...config,
+    cacheConfig: {
+      ...config.cacheConfig,
+      snapshotDir: dir,
+      cacheMaxEntries: maxEntries,
+    },
+  };
+  return { cache: new FilesystemCache(testConfig), dir };
+}
+
+function fakeContext(body: string): Koa.Context {
+  return ({
+    body,
+    response: { status: 200, header: {} },
+    request: { url: '/' },
+    query: {},
+  } as unknown) as Koa.Context;
+}
+
+function filesWithSuffix(dir: string, suffix: string) {
+  return fs.readdirSync(dir).filter((name) => name.endsWith(suffix));
+}
+
+function secondsAgo(seconds: number) {
+  return Date.now() / 1000 - seconds;
+}
+
+function writeEntries(dir: string, count: number) {
+  const names: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const name = `entry-${String(i).padStart(2, '0')}.json`;
+    const filePath = path.join(dir, name);
+    fs.writeFileSync(filePath, JSON.stringify({ responseBody: name }));
+    const mtime = secondsAgo(1000 - i);
+    fs.utimesSync(filePath, mtime, mtime);
+    names.push(name);
+  }
+  return names;
+}
+
+test.after.always(() => {
+  for (const dir of testDirs) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('atomic write leaves no temporary files', async (t: ExecutionContext) => {
+  const { cache: testCache, dir } = makeCache();
+  await testCache.cacheContent('atomic', fakeContext('atomic body'));
+  const jsonFiles = filesWithSuffix(dir, '.json');
+  t.is(jsonFiles.length, 1);
+  t.is(filesWithSuffix(dir, '.tmp').length, 0);
+  const parsed = JSON.parse(
+    fs.readFileSync(path.join(dir, jsonFiles[0]), 'utf8')
+  );
+  t.is(parsed.responseBody, 'atomic body');
+  t.is(parsed.request, undefined);
+});
+
+test('concurrent writes of one key never give a partial read', async (t: ExecutionContext) => {
+  const { cache: testCache } = makeCache();
+  const key = testCache.hashCode('/concurrent');
+  const minSize = 1024;
+  const maxSize = 2 * 1024 * 1024;
+  const bodies = Array.from({ length: 20 }, (_, i) =>
+    String.fromCharCode(97 + i).repeat(
+      minSize + Math.floor((i * (maxSize - minSize)) / 19)
+    )
+  );
+  const writes = bodies.map((body) =>
+    testCache.cacheContent(key, fakeContext(body))
+  );
+  let badReads = 0;
+  for (let i = 0; i < 50; i++) {
+    const content = testCache.getCachedContent(fakeContext(''), key);
+    if (content !== null && !bodies.includes(content.payload)) {
+      badReads++;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  await Promise.all(writes);
+  t.is(badReads, 0);
+  const last = testCache.getCachedContent(fakeContext(''), key);
+  t.truthy(last);
+  t.true(bodies.includes(last ? last.payload : ''));
+});
+
+test('clearCache ignores a missing file', async (t: ExecutionContext) => {
+  const { cache: testCache } = makeCache();
+  await t.notThrowsAsync(testCache.clearCache('does-not-exist'));
+});
+
+test('clearAllCache survives concurrent removal', async (t: ExecutionContext) => {
+  const { cache: testCache, dir } = makeCache();
+  for (let i = 0; i < 20; i++) {
+    await testCache.cacheContent(`key-${i}`, fakeContext(`body ${i}`));
+  }
+  t.is(filesWithSuffix(dir, '.json').length, 20);
+  let uncaught = 0;
+  const listener = () => {
+    uncaught++;
+  };
+  process.on('uncaughtException', listener);
+  try {
+    await t.notThrowsAsync(
+      Promise.all([
+        testCache.clearAllCache(),
+        testCache.clearAllCache(),
+        testCache.clearAllCache(),
+      ])
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } finally {
+    process.removeListener('uncaughtException', listener);
+  }
+  t.is(filesWithSuffix(dir, '.json').length, 0);
+  t.is(uncaught, 0);
+});
+
+test('clearAllCache resolves when readdir fails', async (t: ExecutionContext) => {
+  const { cache: testCache, dir } = makeCache();
+  fs.rmdirSync(dir);
+  fs.writeFileSync(dir, 'not a directory');
+  await t.notThrowsAsync(testCache.clearAllCache());
+});
+
+test('eviction trims to 90 percent of maxEntries', async (t: ExecutionContext) => {
+  const { cache: testCache, dir } = makeCache('10');
+  const names = writeEntries(dir, 15);
+  t.is(await testCache.evictIfNeeded(), 'evicted');
+  const remaining = filesWithSuffix(dir, '.json').sort();
+  t.is(remaining.length, 9);
+  t.deepEqual(remaining, names.slice(6));
+});
+
+test('eviction skips below the limit', async (t: ExecutionContext) => {
+  const { cache: testCache, dir } = makeCache('10');
+  writeEntries(dir, 5);
+  t.is(await testCache.evictIfNeeded(), 'below-limit');
+  t.is(filesWithSuffix(dir, '.json').length, 5);
+});
+
+test('eviction honors a fresh lock and takes a stale lock', async (t: ExecutionContext) => {
+  const { cache: testCache, dir } = makeCache('10');
+  writeEntries(dir, 15);
+  const lockPath = path.join(dir, '.evict.lock');
+  fs.writeFileSync(lockPath, '');
+  t.is(await testCache.evictIfNeeded(), 'locked');
+  t.is(filesWithSuffix(dir, '.json').length, 15);
+  const old = secondsAgo(400);
+  fs.utimesSync(lockPath, old, old);
+  t.is(await testCache.evictIfNeeded(), 'evicted');
+  t.false(fs.readdirSync(dir).includes('.evict.lock'));
+  t.is(filesWithSuffix(dir, '.json').length, 9);
+});
+
+test('eviction removes stale temporary files', async (t: ExecutionContext) => {
+  const { cache: testCache, dir } = makeCache('10');
+  writeEntries(dir, 15);
+  const staleTmp = path.join(dir, 'stale.json.1.deadbeef.tmp');
+  const freshTmp = path.join(dir, 'fresh.json.1.cafebabe.tmp');
+  fs.writeFileSync(staleTmp, 'partial');
+  fs.writeFileSync(freshTmp, 'partial');
+  const staleTime = secondsAgo(700);
+  const freshTime = secondsAgo(10);
+  fs.utimesSync(staleTmp, staleTime, staleTime);
+  fs.utimesSync(freshTmp, freshTime, freshTime);
+  t.is(await testCache.evictIfNeeded(), 'evicted');
+  const tmpFiles = filesWithSuffix(dir, '.tmp');
+  t.false(tmpFiles.includes(path.basename(staleTmp)));
+  t.true(tmpFiles.includes(path.basename(freshTmp)));
+});
+
+test.serial(
+  'cache write does not stat every entry',
+  async (t: ExecutionContext) => {
+    const { cache: testCache, dir } = makeCache('10');
+    writeEntries(dir, 50);
+    const mutableFs = (fs as unknown) as {
+      statSync: (...args: unknown[]) => unknown;
+    };
+    const mutablePromises = (fs.promises as unknown) as {
+      stat: (...args: unknown[]) => Promise<unknown>;
+    };
+    const realStatSync = mutableFs.statSync;
+    const realStat = mutablePromises.stat;
+    let statSyncCalls = 0;
+    let statCalls = 0;
+    mutableFs.statSync = (...args: unknown[]) => {
+      statSyncCalls++;
+      return realStatSync.apply(fs, args);
+    };
+    mutablePromises.stat = (...args: unknown[]) => {
+      statCalls++;
+      return realStat.apply(fs.promises, args);
+    };
+    let callsAtResolve: number[];
+    try {
+      await testCache.cacheContent('no-stat', fakeContext('body'));
+      callsAtResolve = [statSyncCalls, statCalls];
+    } finally {
+      mutableFs.statSync = realStatSync;
+      mutablePromises.stat = realStat;
+    }
+    t.deepEqual(callsAtResolve, [0, 0]);
   }
 );
