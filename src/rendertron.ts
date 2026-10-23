@@ -10,17 +10,6 @@ import url from 'url';
 
 import { Renderer, ScreenshotError } from './renderer';
 import { Config, ConfigManager } from './config';
-import {
-  BASIC_AUTH_HEADER,
-  BASIC_AUTH_ORIGINS_ENV,
-  INVALID_HEADER_BODY,
-  ORIGIN_NOT_ALLOWED_BODY,
-  originOf,
-  parseBasicAuthHeader,
-  parseBasicAuthOrigins,
-} from './basic-auth';
-
-export { parseBasicAuthHeader } from './basic-auth';
 
 /**
  * Rendertron rendering service. This runs the server which routes rendering
@@ -32,7 +21,6 @@ export class Rendertron {
   private renderer: Renderer | undefined;
   private port = process.env.PORT || null;
   private host = process.env.HOST || null;
-  private basicAuthOrigins: string[] = [];
 
   async createRenderer(config: Config) {
     const browser = await puppeteer.launch({ args: config.puppeteerArgs });
@@ -45,14 +33,6 @@ export class Rendertron {
   }
 
   async initialize(config?: Config) {
-    const basicAuthOrigins = parseBasicAuthOrigins(
-      process.env[BASIC_AUTH_ORIGINS_ENV]
-    );
-    this.basicAuthOrigins = basicAuthOrigins.origins;
-    if (basicAuthOrigins.invalidCount > 0) {
-      console.log(`ignoring an invalid origin in ${BASIC_AUTH_ORIGINS_ENV}`);
-    }
-
     // Load config
     this.config = config || (await ConfigManager.getConfiguration());
 
@@ -168,31 +148,12 @@ export class Rendertron {
       return;
     }
 
-    let basicAuth: string | undefined;
-    const basicAuthHeader = ctx.get(BASIC_AUTH_HEADER);
-    if (this.basicAuthOrigins.length > 0 && basicAuthHeader) {
-      const origin = originOf(url);
-      if (!origin || !this.basicAuthOrigins.includes(origin)) {
-        ctx.status = 400;
-        ctx.body = ORIGIN_NOT_ALLOWED_BODY;
-        return;
-      }
-      const token = parseBasicAuthHeader(basicAuthHeader);
-      if (!token) {
-        ctx.status = 400;
-        ctx.body = INVALID_HEADER_BODY;
-        return;
-      }
-      basicAuth = token;
-    }
-
     const mobileVersion = 'mobile' in ctx.query ? true : false;
 
     const serialized = await this.renderer.serialize(
       url,
       mobileVersion,
-      ctx.query.timezoneId,
-      basicAuth
+      ctx.query.timezoneId
     );
 
     for (const key in this.config.headers) {

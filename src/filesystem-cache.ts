@@ -221,7 +221,6 @@ export class FilesystemCache {
     const dir = this.getDir('');
     const entries: EntryStat[] = [];
     const staleTmpFiles: string[] = [];
-    let tmpFiles = 0;
     const now = Date.now();
 
     await runWithConcurrency(names, EVICTION_STAT_CONCURRENCY, async (name) => {
@@ -230,11 +229,8 @@ export class FilesystemCache {
         const mtime = stats.mtime.getTime();
         if (name.endsWith('.json')) {
           entries.push({ name, mtime });
-        } else {
-          tmpFiles++;
-          if (now - mtime > TMP_FILE_STALE_MS) {
-            staleTmpFiles.push(name);
-          }
+        } else if (now - mtime > TMP_FILE_STALE_MS) {
+          staleTmpFiles.push(name);
         }
       } catch (err) {
         if (errorCode(err) !== 'ENOENT') {
@@ -244,9 +240,6 @@ export class FilesystemCache {
     });
 
     const target = Math.floor(maxEntries * EVICTION_LOW_WATER_RATIO);
-    console.log(
-      `cache eviction scan in ${dir}: ${entries.length} entries, ${tmpFiles} temporary files, ${staleTmpFiles.length} stale temporary files, target ${target}`
-    );
     entries.sort((a, b) => a.mtime - b.mtime);
     const toRemove = entries
       .slice(0, Math.max(0, entries.length - target))
@@ -280,14 +273,8 @@ export class FilesystemCache {
       if (count <= maxEntries) {
         return 'below-limit';
       }
-      console.log(
-        `cache eviction needed in ${dir}: ${count} entries, limit ${maxEntries}`
-      );
 
       const lock = await this.acquireEvictionLock();
-      if (lock === 'locked') {
-        console.log(`cache eviction skipped in ${dir}: lock held`);
-      }
       if (lock !== 'acquired') {
         return lock;
       }
