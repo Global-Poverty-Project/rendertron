@@ -3,6 +3,7 @@ import url from 'url';
 import { dirname } from 'path';
 
 import { Config } from './config';
+import { originOf } from './basic-auth';
 
 type SerializedResponse = {
   status: number;
@@ -45,10 +46,68 @@ export class Renderer {
     return false;
   }
 
+  private continueWithBasicAuth(
+    interceptedRequest: puppeteer.HTTPRequest,
+    targetOrigin: string | null,
+    basicAuth: string
+  ) {
+    if (targetOrigin === null) {
+      interceptedRequest.abort();
+      return;
+    }
+    if (originOf(interceptedRequest.url()) === targetOrigin) {
+      interceptedRequest.continue({
+        headers: {
+          ...interceptedRequest.headers(),
+          authorization: `Basic ${basicAuth}`,
+        },
+      });
+      return;
+    }
+    const redirectedFromTarget = interceptedRequest
+      .redirectChain()
+      .some((previous) => originOf(previous.url()) === targetOrigin);
+    if (redirectedFromTarget) {
+      interceptedRequest.abort();
+      return;
+    }
+    interceptedRequest.continue();
+  }
+
   async serialize(
     requestUrl: string,
     isMobile: boolean,
-    timezoneId?: string
+    timezoneId?: string,
+    basicAuth?: string
+  ): Promise<SerializedResponse> {
+    if (basicAuth === undefined) {
+      return this.serializePage(
+        await this.browser.newPage(),
+        requestUrl,
+        isMobile,
+        timezoneId
+      );
+    }
+    const context = await this.browser.createIncognitoBrowserContext();
+    try {
+      return await this.serializePage(
+        await context.newPage(),
+        requestUrl,
+        isMobile,
+        timezoneId,
+        basicAuth
+      );
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  }
+
+  private async serializePage(
+    page: puppeteer.Page,
+    requestUrl: string,
+    isMobile: boolean,
+    timezoneId?: string,
+    basicAuth?: string
   ): Promise<SerializedResponse> {
     /**
      * Executed on the page after the page has loaded. Strips script and
@@ -91,8 +150,6 @@ export class Renderer {
       }
     }
 
-    const page = await this.browser.newPage();
-
     // Page may reload when setting isMobile
     // https://github.com/GoogleChrome/puppeteer/blob/v1.10.0/docs/api.md#pagesetviewportviewport
     await page.setViewport({
@@ -127,9 +184,14 @@ export class Renderer {
 
     await page.setRequestInterception(true);
 
+    const targetOrigin =
+      basicAuth === undefined ? null : originOf(requestUrl);
+
     page.on('request', (interceptedRequest: puppeteer.HTTPRequest) => {
       if (this.restrictRequest(interceptedRequest.url())) {
         interceptedRequest.abort();
+      } else if (basicAuth !== undefined) {
+        this.continueWithBasicAuth(interceptedRequest, targetOrigin, basicAuth);
       } else {
         interceptedRequest.continue();
       }
