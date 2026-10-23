@@ -136,6 +136,16 @@ export class Renderer {
     });
 
     let response: puppeteer.HTTPResponse | null = null;
+    let documentResponse: puppeteer.HTTPResponse | null = null;
+    let domContentLoaded = false;
+    page.on('response', (r: puppeteer.HTTPResponse) => {
+      if (r.request().isNavigationRequest() && r.frame() === page.mainFrame()) {
+        documentResponse = r;
+      }
+    });
+    page.once('domcontentloaded', () => {
+      domContentLoaded = true;
+    });
 
     try {
       // Navigate to page. Wait until at most 2 network requests are outstanding.
@@ -145,11 +155,16 @@ export class Renderer {
       });
     } catch (e) {
       console.error(e);
-      await page.close();
-      if (this.config.closeBrowser) {
-        await this.browser.close();
+      // serve what is parsed so far, with the status of the final document after redirects
+      if (domContentLoaded && documentResponse) {
+        response = documentResponse;
+      } else {
+        await page.close();
+        if (this.config.closeBrowser) {
+          await this.browser.close();
+        }
+        return { status: 503, customHeaders: new Map(), content: '' };
       }
-      return { status: 503, customHeaders: new Map(), content: '' };
     }
 
     if (!response) {
