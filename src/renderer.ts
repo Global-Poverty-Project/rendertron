@@ -136,24 +136,35 @@ export class Renderer {
     });
 
     let response: puppeteer.HTTPResponse | null = null;
-    // Capture main frame response. This is used in the case that rendering
-    // times out, which results in puppeteer throwing an error. This allows us
-    // to return a partial response for what was able to be rendered in that
-    // time frame.
+    let documentResponse: puppeteer.HTTPResponse | null = null;
+    let domContentLoaded = false;
     page.on('response', (r: puppeteer.HTTPResponse) => {
-      if (!response) {
-        response = r;
+      if (r.request().isNavigationRequest() && r.frame() === page.mainFrame()) {
+        documentResponse = r;
       }
+    });
+    page.once('domcontentloaded', () => {
+      domContentLoaded = true;
     });
 
     try {
-      // Navigate to page. Wait until there are no oustanding network requests.
+      // Navigate to page. Wait until at most 2 network requests are outstanding.
       response = await page.goto(requestUrl, {
         timeout: this.config.timeout,
-        waitUntil: 'networkidle0',
+        waitUntil: 'networkidle2',
       });
     } catch (e) {
       console.error(e);
+      // serve what is parsed so far, with the status of the final document after redirects
+      if (domContentLoaded && documentResponse) {
+        response = documentResponse;
+      } else {
+        await page.close();
+        if (this.config.closeBrowser) {
+          await this.browser.close();
+        }
+        return { status: 503, customHeaders: new Map(), content: '' };
+      }
     }
 
     if (!response) {
