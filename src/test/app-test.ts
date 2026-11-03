@@ -258,8 +258,8 @@ test('invalid url fails', async (t: ExecutionContext) => {
 });
 
 test('unknown url fails', async (t: ExecutionContext) => {
-  const res = await server.get(`/render/http://unknown.blah.com`);
-  t.is(res.status, 400);
+  const res = await server.get(`/render/http://unknown.invalid`);
+  t.is(res.status, 503);
 });
 
 test('file url fails', async (t: ExecutionContext) => {
@@ -326,8 +326,8 @@ test('whitelist ensures other urls do not get rendered', async (t: ExecutionCont
 });
 
 test('unknown url fails safely on screenshot', async (t: ExecutionContext) => {
-  const res = await server.get(`/render/http://unknown.blah.com`);
-  t.is(res.status, 400);
+  const res = await server.get(`/render/http://unknown.invalid`);
+  t.is(res.status, 503);
 });
 
 test('endpont for invalidating memory cache works if configured', async (t: ExecutionContext) => {
@@ -381,7 +381,7 @@ test('endpont for invalidating filesystem cache works if configured', async (t: 
     cacheConfig: {
       cacheDurationMinutes: '120',
       cacheMaxEntries: '50',
-      snapshotDir: path.join(os.tmpdir(), 'rendertron-test-cache'),
+      snapshotDir: path.join(os.tmpdir(), 'rendertron-test-cache-invalidate'),
     },
     timeout: 10000,
     port: '3000',
@@ -422,7 +422,7 @@ test('endpont for invalidating filesystem cache works if configured', async (t: 
 
   // cleanup cache to prevent future tests failing
   res = await cached_server.get(`/invalidate/${testBase}basic-script.html`);
-  fs.rmdirSync(path.join(os.tmpdir(), 'rendertron-test-cache'));
+  fs.rmdirSync(path.join(os.tmpdir(), 'rendertron-test-cache-invalidate'));
 });
 
 test('http header should be set via config', async (t: ExecutionContext) => {
@@ -513,7 +513,7 @@ test.serial(
       cacheConfig: {
         cacheDurationMinutes: '120',
         cacheMaxEntries: '50',
-        snapshotDir: path.join(os.tmpdir(), 'rendertron-test-cache'),
+        snapshotDir: path.join(os.tmpdir(), 'rendertron-test-cache-clear-all'),
       },
       timeout: 10000,
       port: '3000',
@@ -559,7 +559,7 @@ test.serial(
     await cached_server.get(`/invalidate`);
     // cleanup cache to prevent future tests failing
     await cached_server.get(`/invalidate/`);
-    fs.rmdirSync(path.join(os.tmpdir(), 'rendertron-test-cache'));
+    fs.rmdirSync(path.join(os.tmpdir(), 'rendertron-test-cache-clear-all'));
   }
 );
 
@@ -592,7 +592,7 @@ test('urls mathing pattern are restricted', async (t) => {
     cacheConfig: {
       cacheDurationMinutes: '120',
       cacheMaxEntries: '50',
-      snapshotDir: path.join(os.tmpdir(), 'rendertron-test-cache'),
+      snapshotDir: path.join(os.tmpdir(), 'rendertron-test-cache-restricted'),
     },
     timeout: 10000,
     port: '3000',
@@ -614,11 +614,11 @@ test('urls mathing pattern are restricted', async (t) => {
   await app.listen(1240);
   // Make a restriced request
   let res = await cached_server.get(`/render/${testBase}restrict-test.test.html`);
-  t.is(res.status, 400);
+  t.is(res.status, 503);
   t.is(res.header['x-renderer'], 'rendertron');
 
   res = await cached_server.get(`/render/${testBase}restrict-test.test.html?hello=world`);
-  t.is(res.status, 400);
+  t.is(res.status, 503);
   t.is(res.header['x-renderer'], 'rendertron');
 
   // Non restricted calls should pass through
@@ -631,6 +631,6 @@ test('urls mathing pattern are restricted', async (t) => {
   await cached_server.get(`/invalidate`);
   // cleanup cache to prevent future tests failing
   await cached_server.get(`/invalidate/`);
-  fs.rmdirSync(path.join(os.tmpdir(), 'rendertron-test-cache'));
+  fs.rmdirSync(path.join(os.tmpdir(), 'rendertron-test-cache-restricted'));
 });
 
