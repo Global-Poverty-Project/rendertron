@@ -4,7 +4,7 @@ import { dirname } from 'path';
 
 import { Config } from './config';
 
-type SerializedResponse = {
+export type SerializedResponse = {
   status: number;
   customHeaders: Map<string, string>;
   content: string;
@@ -17,6 +17,10 @@ type ViewportDimensions = {
 
 const MOBILE_USERAGENT =
   'Mozilla/5.0 (Linux; Android 8.0.0; Pixel 2 XL Build/OPD1.170816.004) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.75 Mobile Safari/537.36';
+
+const NETWORK_QUIET_MS = 500;
+const NETWORK_QUIET_MAX_INFLIGHT = 2;
+const NETWORK_POLL_MS = 50;
 
 /**
  * Wraps Puppeteer's interface to Headless Chrome to expose high level rendering
@@ -43,6 +47,18 @@ export class Renderer {
     }
 
     return false;
+  }
+
+  private samePath(from: string, location: string): boolean {
+    try {
+      const source = new URL(from);
+      const target = new URL(location, from);
+      return (
+        source.origin === target.origin && source.pathname === target.pathname
+      );
+    } catch (e) {
+      return false;
+    }
   }
 
   async serialize(
@@ -127,17 +143,51 @@ export class Renderer {
 
     await page.setRequestInterception(true);
 
-    page.on('request', (interceptedRequest: puppeteer.HTTPRequest) => {
-      if (this.restrictRequest(interceptedRequest.url())) {
-        interceptedRequest.abort();
-      } else {
-        interceptedRequest.continue();
-      }
-    });
-
     let response: puppeteer.HTTPResponse | null = null;
     let documentResponse: puppeteer.HTTPResponse | null = null;
     let domContentLoaded = false;
+    const redirect = { status: 0, location: '' };
+    const inflight = new Set<puppeteer.HTTPRequest>();
+    let lastNetworkActivity = Date.now();
+
+    page.on('request', (interceptedRequest: puppeteer.HTTPRequest) => {
+      const frame = interceptedRequest.frame();
+      const chain = interceptedRequest.redirectChain();
+      if (
+        !domContentLoaded &&
+        chain.length &&
+        interceptedRequest.isNavigationRequest() &&
+        frame === page.mainFrame()
+      ) {
+        const first = chain[0].response();
+        const location = first ? first.headers()['location'] : undefined;
+        // nginx proxies only the path, so a redirect that changes just the query would loop the bot
+        if (first && location && !this.samePath(chain[0].url(), location)) {
+          redirect.status = first.status();
+          redirect.location = location;
+          interceptedRequest.abort();
+          return;
+        }
+      }
+      if (
+        this.restrictRequest(interceptedRequest.url()) ||
+        (frame && frame !== page.mainFrame())
+      ) {
+        interceptedRequest.abort();
+        return;
+      }
+      inflight.add(interceptedRequest);
+      lastNetworkActivity = Date.now();
+      interceptedRequest.continue();
+    });
+    const settle = (r: puppeteer.HTTPRequest) => {
+      if (inflight.delete(r)) {
+        lastNetworkActivity = Date.now();
+      }
+    };
+    page.on('requestfinished', settle);
+    page.on('requestfailed', settle);
+
     page.on('response', (r: puppeteer.HTTPResponse) => {
       if (r.request().isNavigationRequest() && r.frame() === page.mainFrame()) {
         documentResponse = r;
@@ -147,24 +197,59 @@ export class Renderer {
       domContentLoaded = true;
     });
 
+    const deadline = Date.now() + this.config.timeout;
     try {
-      // Navigate to page. Wait until at most 2 network requests are outstanding.
       response = await page.goto(requestUrl, {
         timeout: this.config.timeout,
-        waitUntil: 'networkidle2',
+        waitUntil: 'load',
       });
-    } catch (e) {
-      console.error(e);
-      // serve what is parsed so far, with the status of the final document after redirects
-      if (domContentLoaded && documentResponse) {
-        response = documentResponse;
-      } else {
-        await page.close();
-        if (this.config.closeBrowser) {
-          await this.browser.close();
-        }
-        return { status: 503, customHeaders: new Map(), content: '' };
+      // chromium's networkidle never fires while page scripts keep the main thread busy
+      const quiet = await new Promise<boolean>((resolve) => {
+        const timer = setInterval(() => {
+          const now = Date.now();
+          if (
+            inflight.size <= NETWORK_QUIET_MAX_INFLIGHT &&
+            now - lastNetworkActivity >= NETWORK_QUIET_MS
+          ) {
+            clearInterval(timer);
+            resolve(true);
+          } else if (now >= deadline) {
+            clearInterval(timer);
+            resolve(false);
+          }
+        }, NETWORK_POLL_MS);
+      });
+      if (!quiet) {
+        console.error(
+          `network still busy at ${this.config.timeout}ms: ${requestUrl}`
+        );
       }
+    } catch (e) {
+      if (!redirect.location) {
+        console.error(e);
+        // serve what is parsed so far, with the status of the final document after redirects
+        if (domContentLoaded && documentResponse) {
+          response = documentResponse;
+        } else {
+          await page.close();
+          if (this.config.closeBrowser) {
+            await this.browser.close();
+          }
+          return { status: 503, customHeaders: new Map(), content: '' };
+        }
+      }
+    }
+
+    if (redirect.location) {
+      await page.close();
+      if (this.config.closeBrowser) {
+        await this.browser.close();
+      }
+      return {
+        status: redirect.status,
+        customHeaders: new Map([['Location', redirect.location]]),
+        content: '',
+      };
     }
 
     if (!response) {
