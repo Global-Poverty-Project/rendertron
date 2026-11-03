@@ -89,7 +89,7 @@ test('renders a page whose main thread never goes idle', async (t: ExecutionCont
   t.true(Date.now() - start < 4000);
 });
 
-test.serial('shares one render between parallel requests for the same url', async (t: ExecutionContext) => {
+test('shares one render between parallel requests for the same url', async (t: ExecutionContext) => {
   const renderer = rendertron['renderer'] as Renderer;
   const original = renderer.serialize;
   const serialize = original.bind(renderer);
