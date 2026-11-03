@@ -1,0 +1,9 @@
+<title>busy-main-thread</title>
+<script>
+  function spin() {
+    const end = Date.now() + 40;
+    while (Date.now() < end) {}
+    requestAnimationFrame(spin);
+  }
+  requestAnimationFrame(spin);
+</script>

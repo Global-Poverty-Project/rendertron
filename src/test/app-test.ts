@@ -23,8 +23,17 @@ import fs from 'fs';
 import os from 'os';
 
 import { Rendertron } from '../rendertron';
+import { Renderer } from '../renderer';
 
 const app = new Koa();
+app.use(async (ctx, next) => {
+  if (ctx.path === '/redirect') {
+    ctx.status = 301;
+    ctx.set('Location', '/basic-script.html');
+    return;
+  }
+  await next();
+});
 app.use(koaStatic(path.resolve(__dirname, '../../test-resources')));
 
 const testBase = 'http://localhost:1234/';
@@ -48,6 +57,38 @@ test('renders basic script', async (t: ExecutionContext) => {
   t.is(res.status, 200);
   t.true(res.text.indexOf('document-title') !== -1);
   t.is(res.header['x-renderer'], 'rendertron');
+});
+
+test('passes a redirect of the page through without rendering it', async (t: ExecutionContext) => {
+  const res = await server.get(`/render/${testBase}redirect`);
+  t.is(res.status, 301);
+  t.is(res.header['location'], '/basic-script.html');
+  t.is(res.text, '');
+});
+
+test('renders a page whose main thread never goes idle', async (t: ExecutionContext) => {
+  const start = Date.now();
+  const res = await server.get(`/render/${testBase}busy-main-thread.html`);
+  t.is(res.status, 200);
+  t.true(res.text.indexOf('busy-main-thread') !== -1);
+  t.true(Date.now() - start < 4000);
+});
+
+test('shares one render between parallel requests for the same url', async (t: ExecutionContext) => {
+  const renderer = rendertron['renderer'] as Renderer;
+  const serialize = renderer.serialize.bind(renderer);
+  let calls = 0;
+  renderer.serialize = (url, ...rest) => {
+    if (url.endsWith('custom-element.html')) {
+      calls++;
+    }
+    return serialize(url, ...rest);
+  };
+  const url = `/render/${testBase}custom-element.html`;
+  const [a, b] = await Promise.all([server.get(url), server.get(url)]);
+  t.is(a.status, 200);
+  t.is(b.status, 200);
+  t.is(calls, 1);
 });
 
 test('renders script after page load event', async (t: ExecutionContext) => {

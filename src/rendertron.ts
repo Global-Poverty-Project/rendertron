@@ -8,7 +8,7 @@ import path from 'path';
 import puppeteer from 'puppeteer';
 import url from 'url';
 
-import { Renderer, ScreenshotError } from './renderer';
+import { Renderer, ScreenshotError, SerializedResponse } from './renderer';
 import { Config, ConfigManager } from './config';
 
 /**
@@ -19,6 +19,7 @@ export class Rendertron {
   app: Koa = new Koa();
   private config: Config = ConfigManager.config;
   private renderer: Renderer | undefined;
+  private pendingRenders = new Map<string, Promise<SerializedResponse>>();
   private port = process.env.PORT || null;
   private host = process.env.HOST || null;
 
@@ -150,11 +151,25 @@ export class Rendertron {
 
     const mobileVersion = 'mobile' in ctx.query ? true : false;
 
-    const serialized = await this.renderer.serialize(
-      url,
-      mobileVersion,
-      ctx.query.timezoneId
-    );
+    const renderKey = `${mobileVersion} ${ctx.query.timezoneId} ${url}`;
+    let pending = this.pendingRenders.get(renderKey);
+    if (!pending) {
+      const done = () => this.pendingRenders.delete(renderKey);
+      pending = this.renderer
+        .serialize(url, mobileVersion, ctx.query.timezoneId)
+        .then(
+          (result) => {
+            done();
+            return result;
+          },
+          (err) => {
+            done();
+            throw err;
+          }
+        );
+      this.pendingRenders.set(renderKey, pending);
+    }
+    const serialized = await pending;
 
     for (const key in this.config.headers) {
       ctx.set(key, this.config.headers[key]);
