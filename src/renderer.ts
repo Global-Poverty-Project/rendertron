@@ -19,6 +19,7 @@ const MOBILE_USERAGENT =
   'Mozilla/5.0 (Linux; Android 8.0.0; Pixel 2 XL Build/OPD1.170816.004) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.75 Mobile Safari/537.36';
 
 const NETWORK_QUIET_MS = 500;
+const NETWORK_QUIET_MAX_INFLIGHT = 2;
 const NETWORK_POLL_MS = 50;
 
 /**
@@ -46,6 +47,18 @@ export class Renderer {
     }
 
     return false;
+  }
+
+  private samePath(from: string, location: string): boolean {
+    try {
+      const source = new URL(from);
+      const target = new URL(location, from);
+      return (
+        source.origin === target.origin && source.pathname === target.pathname
+      );
+    } catch (e) {
+      return false;
+    }
   }
 
   async serialize(
@@ -148,7 +161,8 @@ export class Renderer {
       ) {
         const first = chain[0].response();
         const location = first ? first.headers()['location'] : undefined;
-        if (first && location) {
+        // nginx proxies only the path, so a redirect that changes just the query would loop the bot
+        if (first && location && !this.samePath(chain[0].url(), location)) {
           redirect.status = first.status();
           redirect.location = location;
           interceptedRequest.abort();
@@ -193,7 +207,10 @@ export class Renderer {
       const quiet = await new Promise<boolean>((resolve) => {
         const timer = setInterval(() => {
           const now = Date.now();
-          if (!inflight.size && now - lastNetworkActivity >= NETWORK_QUIET_MS) {
+          if (
+            inflight.size <= NETWORK_QUIET_MAX_INFLIGHT &&
+            now - lastNetworkActivity >= NETWORK_QUIET_MS
+          ) {
             clearInterval(timer);
             resolve(true);
           } else if (now >= deadline) {

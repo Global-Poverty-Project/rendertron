@@ -32,6 +32,15 @@ app.use(async (ctx, next) => {
     ctx.set('Location', '/basic-script.html');
     return;
   }
+  if (ctx.path === '/query-redirect') {
+    if (!ctx.querystring) {
+      ctx.status = 302;
+      ctx.set('Location', '/query-redirect?lang=en');
+      return;
+    }
+    ctx.body = '<title>query-redirect</title>';
+    return;
+  }
   await next();
 });
 app.use(koaStatic(path.resolve(__dirname, '../../test-resources')));
@@ -66,6 +75,12 @@ test('passes a redirect of the page through without rendering it', async (t: Exe
   t.is(res.text, '');
 });
 
+test('renders a redirect that only changes the query', async (t: ExecutionContext) => {
+  const res = await server.get(`/render/${testBase}query-redirect`);
+  t.is(res.status, 200);
+  t.true(res.text.indexOf('query-redirect') !== -1);
+});
+
 test('renders a page whose main thread never goes idle', async (t: ExecutionContext) => {
   const start = Date.now();
   const res = await server.get(`/render/${testBase}busy-main-thread.html`);
@@ -74,9 +89,10 @@ test('renders a page whose main thread never goes idle', async (t: ExecutionCont
   t.true(Date.now() - start < 4000);
 });
 
-test('shares one render between parallel requests for the same url', async (t: ExecutionContext) => {
+test.serial('shares one render between parallel requests for the same url', async (t: ExecutionContext) => {
   const renderer = rendertron['renderer'] as Renderer;
-  const serialize = renderer.serialize.bind(renderer);
+  const original = renderer.serialize;
+  const serialize = original.bind(renderer);
   let calls = 0;
   renderer.serialize = (url, ...rest) => {
     if (url.endsWith('custom-element.html')) {
@@ -84,11 +100,15 @@ test('shares one render between parallel requests for the same url', async (t: E
     }
     return serialize(url, ...rest);
   };
-  const url = `/render/${testBase}custom-element.html`;
-  const [a, b] = await Promise.all([server.get(url), server.get(url)]);
-  t.is(a.status, 200);
-  t.is(b.status, 200);
-  t.is(calls, 1);
+  try {
+    const url = `/render/${testBase}custom-element.html`;
+    const [a, b] = await Promise.all([server.get(url), server.get(url)]);
+    t.is(a.status, 200);
+    t.is(b.status, 200);
+    t.is(calls, 1);
+  } finally {
+    renderer.serialize = original;
+  }
 });
 
 test('renders script after page load event', async (t: ExecutionContext) => {
