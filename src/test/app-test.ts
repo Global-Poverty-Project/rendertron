@@ -41,6 +41,11 @@ app.use(async (ctx, next) => {
     ctx.body = '<title>query-redirect</title>';
     return;
   }
+  if (ctx.path.startsWith('/slow/')) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    ctx.body = '<title>slow</title>';
+    return;
+  }
   await next();
 });
 app.use(koaStatic(path.resolve(__dirname, '../../test-resources')));
@@ -634,3 +639,83 @@ test('urls mathing pattern are restricted', async (t) => {
   fs.rmdirSync(path.join(os.tmpdir(), 'rendertron-test-cache-restricted'));
 });
 
+function cappedConfig(
+  maxConcurrentRenders: number,
+  renderQueueTimeout: number
+) {
+  return {
+    cache: null,
+    cacheConfig: {},
+    timeout: 10000,
+    port: '0',
+    host: '0.0.0.0',
+    width: 1000,
+    height: 1000,
+    reqHeaders: {},
+    headers: {},
+    puppeteerArgs: ['--no-sandbox'],
+    renderOnly: [],
+    closeBrowser: false,
+    restrictedUrlPattern: null,
+    maxConcurrentRenders,
+    renderQueueTimeout,
+  };
+}
+
+test.serial('rejects a render with 503 when every slot stays busy', async (t) => {
+  const capped = request(
+    await new Rendertron().initialize(cappedConfig(1, 200))
+  );
+  const results = await Promise.all([
+    capped.get(`/render/${testBase}slow/busy-a`),
+    capped.get(`/render/${testBase}slow/busy-b`),
+  ]);
+  const statuses = results.map((r) => r.status).sort();
+  t.deepEqual(statuses, [200, 503]);
+  const rejected = results.find((r) => r.status === 503);
+  t.is(rejected && rejected.header['retry-after'], '10');
+
+  const after = await capped.get(`/render/${testBase}slow/busy-c`);
+  t.is(after.status, 200);
+});
+
+test.serial('queues a render until a slot frees up', async (t) => {
+  const capped = request(
+    await new Rendertron().initialize(cappedConfig(1, 8000))
+  );
+  const results = await Promise.all([
+    capped.get(`/render/${testBase}slow/queue-a`),
+    capped.get(`/render/${testBase}slow/queue-b`),
+  ]);
+  t.deepEqual(
+    results.map((r) => r.status),
+    [200, 200]
+  );
+});
+
+test.serial('parallel requests for one url share a slot', async (t) => {
+  const capped = request(await new Rendertron().initialize(cappedConfig(1, 0)));
+  const results = await Promise.all([
+    capped.get(`/render/${testBase}slow/shared`),
+    capped.get(`/render/${testBase}slow/shared`),
+  ]);
+  t.deepEqual(
+    results.map((r) => r.status),
+    [200, 200]
+  );
+});
+
+test.serial('rejects a screenshot with 503 when every slot stays busy', async (t) => {
+  const capped = request(
+    await new Rendertron().initialize(cappedConfig(1, 200))
+  );
+  const [render, shot] = await Promise.all([
+    capped.get(`/render/${testBase}slow/shot-a`),
+    new Promise((resolve) => setTimeout(resolve, 100)).then(() =>
+      capped.get(`/screenshot/${testBase}slow/shot-b`)
+    ),
+  ]);
+  t.is(render.status, 200);
+  t.is(shot.status, 503);
+  t.is(shot.header['retry-after'], '10');
+});
