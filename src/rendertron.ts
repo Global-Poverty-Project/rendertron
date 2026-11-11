@@ -20,6 +20,8 @@ export class Rendertron {
   private config: Config = ConfigManager.config;
   private renderer: Renderer | undefined;
   private pendingRenders = new Map<string, Promise<SerializedResponse>>();
+  private activeRenders = 0;
+  private renderQueue: Array<() => void> = [];
   private port = process.env.PORT || null;
   private host = process.env.HOST || null;
 
@@ -139,6 +141,61 @@ export class Rendertron {
     return true;
   }
 
+  private acquireRenderSlot(): Promise<boolean> {
+    const max = this.config.maxConcurrentRenders || 0;
+    if (max <= 0 || this.activeRenders < max) {
+      this.activeRenders++;
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const grant = () => {
+        clearTimeout(timer);
+        this.activeRenders++;
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        this.renderQueue.splice(this.renderQueue.indexOf(grant), 1);
+        resolve(false);
+      }, this.config.renderQueueTimeout || 0);
+      this.renderQueue.push(grant);
+    });
+  }
+
+  private releaseRenderSlot() {
+    this.activeRenders--;
+    const next = this.renderQueue.shift();
+    if (next) {
+      next();
+    }
+  }
+
+  private busyRetryAfter(): string {
+    return Math.ceil(this.config.timeout / 1000).toString();
+  }
+
+  private async serializeInSlot(
+    url: string,
+    mobileVersion: boolean,
+    timezoneId?: string
+  ): Promise<SerializedResponse> {
+    if (!(await this.acquireRenderSlot())) {
+      console.error(`all render slots busy, 503: ${url}`);
+      return {
+        status: 503,
+        customHeaders: new Map([['Retry-After', this.busyRetryAfter()]]),
+        content: '',
+      };
+    }
+    try {
+      if (!this.renderer) {
+        throw new Error('No renderer initalized yet.');
+      }
+      return await this.renderer.serialize(url, mobileVersion, timezoneId);
+    } finally {
+      this.releaseRenderSlot();
+    }
+  }
+
   async handleRenderRequest(ctx: Koa.Context, url: string) {
     if (!this.renderer) {
       throw new Error('No renderer initalized yet.');
@@ -155,18 +212,20 @@ export class Rendertron {
     let pending = this.pendingRenders.get(renderKey);
     if (!pending) {
       const done = () => this.pendingRenders.delete(renderKey);
-      pending = this.renderer
-        .serialize(url, mobileVersion, ctx.query.timezoneId)
-        .then(
-          (result) => {
-            done();
-            return result;
-          },
-          (err) => {
-            done();
-            throw err;
-          }
-        );
+      pending = this.serializeInSlot(
+        url,
+        mobileVersion,
+        ctx.query.timezoneId
+      ).then(
+        (result) => {
+          done();
+          return result;
+        },
+        (err) => {
+          done();
+          throw err;
+        }
+      );
       this.pendingRenders.set(renderKey, pending);
     }
     const serialized = await pending;
@@ -202,6 +261,12 @@ export class Rendertron {
 
     const mobileVersion = 'mobile' in ctx.query ? true : false;
 
+    if (!(await this.acquireRenderSlot())) {
+      console.error(`all render slots busy, 503: ${url}`);
+      ctx.set('Retry-After', this.busyRetryAfter());
+      ctx.status = 503;
+      return;
+    }
     try {
       const img = await this.renderer.screenshot(
         url,
@@ -220,6 +285,8 @@ export class Rendertron {
     } catch (error) {
       const err = error as ScreenshotError;
       ctx.status = err.type === 'Forbidden' ? 403 : 500;
+    } finally {
+      this.releaseRenderSlot();
     }
   }
 }

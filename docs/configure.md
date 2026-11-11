@@ -12,6 +12,8 @@ root. Available configuration options:
 - `cacheConfig` - an object array to specify caching options
 - `renderOnly` - restrict the endpoint to only service requests for certain domains. Specified as an array of strings. eg. `['http://render.only.this.domain']`. This is a strict prefix match, so ensure you specify the exact protocols that will be used (eg. http, https).
 - `closeBrowser`_default `false`_ - `true` forces the browser to close and reopen between each page render, some sites might need this to prevent URLs past the first one rendered returning null responses.
+- `maxConcurrentRenders` _default `0`_ - the most renders and screenshots one instance runs at once; each one is a Chrome tab. `0` means no limit. Parallel requests for the same URL share one render and count once.
+- `renderQueueTimeout` _default `0`_ - how long, in ms, a request waits for a free render slot before it gets `503` with a `Retry-After` header. Only used with `maxConcurrentRenders`.
 
 ## cacheConfig
 

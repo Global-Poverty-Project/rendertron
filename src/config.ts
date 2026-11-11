@@ -39,6 +39,8 @@ export type Config = {
   renderOnly: Array<string>;
   closeBrowser: boolean;
   restrictedUrlPattern: string | null;
+  maxConcurrentRenders?: number;
+  renderQueueTimeout?: number;
 };
 
 export class ConfigManager {
@@ -59,7 +61,9 @@ export class ConfigManager {
     puppeteerArgs: ['--no-sandbox'],
     renderOnly: [],
     closeBrowser: false,
-    restrictedUrlPattern: null
+    restrictedUrlPattern: null,
+    maxConcurrentRenders: 0,
+    renderQueueTimeout: 0,
   };
 
   static async getConfiguration(): Promise<Config> {
